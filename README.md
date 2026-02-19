@@ -6,7 +6,7 @@
 
 ## Docker Setup In EC2 commands to be Executed
 
-#optinal
+# optional
 
 sudo apt-get update -y
 
@@ -22,9 +22,9 @@ sudo usermod -aG docker ubuntu
 
 newgrp docker
 
-## Configure EC2 as self-hosted runner:
+## Configure EC2 as a self-hosted runner:
 
-## Setup github secrets:
+## Setup GitHub secrets:
 
 AWS_ACCESS_KEY_ID=
 
