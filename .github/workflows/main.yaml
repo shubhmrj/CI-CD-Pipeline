@@ -49,22 +49,49 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
+      - name: Verify ECR Repository Exists
+        run: |
+          REPO_NAME="${{ secrets.ECR_REPOSITORY_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          
+          if aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION" 2>/dev/null; then
+            echo "✓ ECR repository '$REPO_NAME' found in region '$REGION'"
+          else
+            echo "✗ ECR repository '$REPO_NAME' NOT found"
+            echo "Creating repository..."
+            aws ecr create-repository --repository-name "$REPO_NAME" --region "$REGION"
+            echo "✓ Repository created successfully"
+          fi
+
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
           IMAGE_TAG: latest
+          FULL_IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
         run: |
-          # Verify ECR repository exists before building
+          echo "=================================================="
+          echo "Building Docker Image"
+          echo "=================================================="
           echo "ECR Registry: $ECR_REGISTRY"
           echo "ECR Repository: $ECR_REPOSITORY"
+          echo "Full Image Name: $FULL_IMAGE_NAME"
+          echo "Region: ${{ secrets.AWS_REGION }}"
+          echo ""
+          
           echo "Building Docker image..."
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          echo "Image built successfully. Pushing to ECR..."
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "Image pushed successfully."
-          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t $FULL_IMAGE_NAME .
+          echo "✓ Image built successfully"
+          echo ""
+          
+          echo "Pushing image to ECR..."
+          docker push $FULL_IMAGE_NAME
+          echo "✓ Image pushed successfully to ECR"
+          echo ""
+          
+          echo "image=$FULL_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "Image URI: $FULL_IMAGE_NAME"
 
   Continuous-Deployment:
     needs: build-and-push-ecr-image
@@ -83,35 +110,85 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
+
       - name: Pull latest images
+        env:
+          FULL_IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
         run: |
-          echo "Pulling image from ECR..."
-          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
-          echo "Image pulled successfully."
+          echo "=================================================="
+          echo "Pulling Image from ECR"
+          echo "=================================================="
+          echo "Image: $FULL_IMAGE_NAME"
+          echo ""
+          
+          docker pull $FULL_IMAGE_NAME
+          echo "✓ Image pulled successfully"
 
       - name: Stop and remove container if running
         run: |
-          if docker ps -q --filter "name=mltest" | grep -q .; then
-            echo "Stopping existing container..."
-            docker stop mltest
-            docker rm -fv mltest
-            echo "Container stopped and removed."
+          CONTAINER_NAME="mltest"
+          echo "=================================================="
+          echo "Stopping Existing Container"
+          echo "=================================================="
+          
+          if docker ps -q --filter "name=$CONTAINER_NAME" | grep -q .; then
+            echo "Found running container: $CONTAINER_NAME"
+            echo "Stopping container..."
+            docker stop $CONTAINER_NAME
+            echo "Removing container..."
+            docker rm -fv $CONTAINER_NAME
+            echo "✓ Container stopped and removed"
           else
-            echo "No running container found."
+            echo "ℹ No running container '$CONTAINER_NAME' found"
           fi
 
       - name: Run Docker Image to serve users
+        env:
+          FULL_IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
         run: |
-          echo "Starting new Docker container..."
-          docker run -d -p 8080:8080 --ipc="host" --name=mltest \
+          echo "=================================================="
+          echo "Starting New Docker Container"
+          echo "=================================================="
+          echo "Image: $FULL_IMAGE_NAME"
+          echo "Container Name: mltest"
+          echo "Port: 8080"
+          echo ""
+          
+          docker run -d \
+            -p 8080:8080 \
+            --ipc="host" \
+            --name=mltest \
             -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
             -e AWS_REGION=${{ secrets.AWS_REGION }} \
-            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
-          echo "Container started successfully on port 8080."
+            $FULL_IMAGE_NAME
+          
+          echo "✓ Container started successfully"
+          echo "✓ Application is running on port 8080"
+          
+          # Optional: Wait and check if container is still running
+          sleep 5
+          if docker ps | grep mltest; then
+            echo "✓ Container health check passed"
+          else
+            echo "✗ Container failed to start"
+            docker logs mltest
+            exit 1
+          fi
 
       - name: Clean previous images and containers
         run: |
-          echo "Cleaning up old Docker images and containers..."
+          echo "=================================================="
+          echo "Cleaning Up Old Images and Containers"
+          echo "=================================================="
+          
+          echo "Removing dangling images..."
+          docker image prune -f
+          
+          echo "Removing stopped containers..."
+          docker container prune -f
+          
+          echo "Full cleanup..."
           docker system prune -f
-          echo "Cleanup completed."
+          
+          echo "✓ Cleanup completed successfully"
