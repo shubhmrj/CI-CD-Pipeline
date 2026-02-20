@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: workflow
 
 on:
   push:
@@ -90,13 +90,13 @@ jobs:
           echo "✓ Image pushed successfully to ECR"
           echo ""
           
-          # FIX: Use GITHUB_OUTPUT instead of deprecated set-output
           echo "image=$FULL_IMAGE_NAME" >> $GITHUB_OUTPUT
           echo "Image URI: $FULL_IMAGE_NAME"
 
   Continuous-Deployment:
+    name: Continuous Deployment
     needs: build-and-push-ecr-image
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,7 +104,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -124,67 +125,57 @@ jobs:
           docker pull $FULL_IMAGE_NAME
           echo "✓ Image pulled successfully"
 
-      - name: Stop and remove container if running
-        run: |
-          CONTAINER_NAME="mltest"
-          echo "=================================================="
-          echo "Stopping Existing Container"
-          echo "=================================================="
-          
-          if docker ps -q --filter "name=$CONTAINER_NAME" | grep -q .; then
-            echo "Found running container: $CONTAINER_NAME"
-            echo "Stopping container..."
-            docker stop $CONTAINER_NAME
-            echo "Removing container..."
-            docker rm -fv $CONTAINER_NAME
-            echo "✓ Container stopped and removed"
-          else
-            echo "ℹ No running container '$CONTAINER_NAME' found"
-          fi
-
-      - name: Run Docker Image to serve users
+      - name: Deploy to AWS ECS
         env:
-          FULL_IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+          ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
         run: |
           echo "=================================================="
-          echo "Starting New Docker Container"
+          echo "Deploying to AWS ECS"
           echo "=================================================="
-          echo "Image: $FULL_IMAGE_NAME"
-          echo "Container Name: mltest"
-          echo "Port: 8080"
+          echo "ECS Cluster: $ECS_CLUSTER"
+          echo "ECS Service: $ECS_SERVICE"
+          echo "Task Definition: $ECS_TASK_DEFINITION"
           echo ""
           
-          docker run -d \
-            -p 8080:8080 \
-            --ipc="host" \
-            --name=mltest \
-            $FULL_IMAGE_NAME
+          # Update ECS task definition with new image
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
           
-          echo "✓ Container started successfully"
-          echo "✓ Application is running on port 8080"
-          
-          sleep 5
-          if docker ps | grep mltest; then
-            echo "✓ Container health check passed"
-          else
-            echo "✗ Container failed to start"
-            docker logs mltest
-            exit 1
-          fi
+          echo "✓ ECS service updated successfully"
+          echo "✓ Deployment initiated to AWS ECS"
 
-      - name: Clean previous images and containers
+      - name: Verify Deployment Status
+        env:
+          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
         run: |
           echo "=================================================="
-          echo "Cleaning Up Old Images and Containers"
+          echo "Checking Deployment Status"
           echo "=================================================="
           
-          echo "Removing dangling images..."
+          # Wait for deployment to complete
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region ${{ secrets.AWS_REGION }}
+          
+          echo "✓ Deployment completed successfully"
+          echo "✓ All tasks are running and stable"
+
+      - name: Cleanup Old Images
+        run: |
+          echo "=================================================="
+          echo "Cleaning Up Old Docker Images"
+          echo "=================================================="
+          
           docker image prune -f
-          
-          echo "Removing stopped containers..."
           docker container prune -f
-          
-          echo "Full cleanup..."
-          docker system prune -f
           
           echo "✓ Cleanup completed successfully"
